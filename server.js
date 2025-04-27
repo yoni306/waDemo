@@ -159,6 +159,27 @@ app.post("/api/get-message", async (req, res) => {
     return res.end();
   }
 
+  // ⭐⭐ כטיפול בשליחת הצילומי⭐⭐
+if (nextState === "sendWhatsAppPhotos") {
+  try {
+    await sendCustomerPhotos(senderPhone);
+    await sendWhatsAppMessage(
+      senderPhone,
+      "📸 הצילומים נשלחו בהצלחה כאן בווטסאפ!\n\n0) חזרה לתפריט הקודם\n99) חזרה לתפריט הראשי"
+    );
+    await updateCustomerHistory(senderPhone, "server sent photos success");
+  } catch (error) {
+    console.error("Failed to send photos:", error);
+    await sendWhatsAppMessage(
+      senderPhone,
+      "❗ לא נמצאו צילומים לשליחה.\n\n0) חזרה לתפריט הקודם\n99) חזרה לתפריט הראשי"
+    );
+    await updateCustomerHistory(senderPhone, "server sent photos failed");
+  }
+  await updateLastInteraction(senderPhone, now);
+  return res.end();
+}
+
   const nextNode = chatData.messageMapping[nextState];
   if (!nextNode) {
     console.log(
@@ -377,6 +398,57 @@ async function sendWhatsAppMessage(chatId, message) {
     throw error;
   }
 }
+
+// שליחת צילומים ללקוח או שליחת שגיאה אם לא קיים בשנתיים האחרונות
+
+const mssql = require("mssql");
+const { pool } = require("./db");
+
+async function sendCustomerPhotos(phone) {
+  try {
+    const twoYearsAgo = new Date();
+    twoYearsAgo.setFullYear(twoYearsAgo.getFullYear() - 2);
+    const formattedDate = twoYearsAgo.toISOString().split("T")[0];
+
+    const query = `
+      SELECT ClientID
+      FROM dbo.Client
+      WHERE Tel = @clientPhone
+      AND KDate >= @formattedDate;
+    `;
+
+    const result = await pool
+      .request()
+      .input("clientPhone", mssql.NVarChar, phone)
+      .input("formattedDate", mssql.Date, formattedDate)
+      .query(query);
+
+    if (!result.recordset || result.recordset.length === 0) {
+      throw new Error("לא נמצאו צילומים מהשנתיים האחרונות.");
+    }
+
+    // --- שמירה פנימית
+    const clientNumbers = result.recordset.map(record => record.ClientID.toString());
+    const numberOfResults = clientNumbers.length;
+
+    // --- המשך טיפול (למשל, לשלוח קבצים לפי clientNumbers)
+    console.log("נמצאו צילומים:", numberOfResults, "צילומים");
+    console.log("מספרי הצילומים:", clientNumbers);
+
+   
+
+
+
+    
+
+  } catch (error) {
+    console.error("שגיאה בבדיקת צילומים:", error.message);
+    throw error; // כדי שהקורא ידע שהיה כשל
+  }
+}
+
+  
+
 
 //====================================================//
 //            חיבור ל-MongoDB והרצת שרת

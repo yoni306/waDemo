@@ -15,16 +15,42 @@ const messageMapping = {
     },
   },
 
-  // תפריט שליחת צילומים
   photoUpload: {
     text:
-      "📸 לשליחת צילומים, יש להיכנס לקישור הבא:\n" +
-      "🔗 (https://getphotos.or-hashen.co.il/)\n\n" +
-      "🔙 *הקש 0* לחזרה לתפריט הראשי",
+      "📸 *בחר אפשרות לקבלת צילומים:*\n\n" +
+      "1) 📱 קבלת הצילומים כאן בווטסאפ\n" +
+      "2) 📧 קבלת הצילומים למייל \n\n" +
+      "0) חזרה לתפריט הראשי",
     next: {
+      1: "sendWhatsAppPhotos",
+      2: "sendEmailPhotos",
       0: "start",
     },
   },
+  
+  sendWhatsAppPhotos: {
+    text:
+      "📲 הצילומים מהשנתיים האחרונות יישלחו נא להמתין, בתהליך..\n\n" +
+      "0) חזרה לתפריט הקודם\n" +
+      "99) חזרה לתפריט הראשי",
+    next: {
+      0: "photoUpload",
+      99: "start",
+    },
+  },
+  
+  sendEmailPhotos: {
+    text:
+      "🔗 לשליחת הצילומים למייל, יש להיכנס למערכת:\n" +
+      "(https://getphotos.or-hashen.co.il/)\n\n" +
+      "0) חזרה לתפריט הקודם\n" +
+      "99) חזרה לתפריט הראשי",
+    next: {
+      0: "photoUpload",
+      99: "start",
+    },
+  },
+  
 
   // (נפתח כאן מצב זמני של נציג אנושי, נטפל בלוגיקה בהמשך)
   humanRepresentative: {
