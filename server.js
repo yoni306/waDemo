@@ -162,7 +162,7 @@ app.post("/api/get-message", async (req, res) => {
   // ⭐⭐ כטיפול בשליחת הצילומי⭐⭐
 if (nextState === "sendWhatsAppPhotos") {
   try {
-    await sendCustomerPhotos(senderPhone);
+    await sendBotPhotos(senderPhone);
     await sendWhatsAppMessage(
       senderPhone,
       "📸 הצילומים נשלחו בהצלחה כאן בווטסאפ!\n\n0) חזרה לתפריט הקודם\n99) חזרה לתפריט הראשי"
@@ -399,12 +399,8 @@ async function sendWhatsAppMessage(chatId, message) {
   }
 }
 
-// שליחת צילומים ללקוח או שליחת שגיאה אם לא קיים בשנתיים האחרונות
 
-const mssql = require("mssql");
-const { pool } = require("./db");
-
-async function sendCustomerPhotos(phone) {
+async function sendBotPhotos(phone) {
   try {
     const twoYearsAgo = new Date();
     twoYearsAgo.setFullYear(twoYearsAgo.getFullYear() - 2);
@@ -424,30 +420,85 @@ async function sendCustomerPhotos(phone) {
       .query(query);
 
     if (!result.recordset || result.recordset.length === 0) {
-      throw new Error("לא נמצאו צילומים מהשנתיים האחרונות.");
+      throw new Error("No photos found from the last two years.");
     }
 
-    // --- שמירה פנימית
     const clientNumbers = result.recordset.map(record => record.ClientID.toString());
     const numberOfResults = clientNumbers.length;
 
-    // --- המשך טיפול (למשל, לשלוח קבצים לפי clientNumbers)
-    console.log("נמצאו צילומים:", numberOfResults, "צילומים");
-    console.log("מספרי הצילומים:", clientNumbers);
+    console.log("✅ Found photos:", numberOfResults);
+    console.log("✅ Photo session numbers:", clientNumbers);
 
-   
+    // Fetching document names based on client numbers
+    const docNames = await fetchDocumentNamesForClients(clientNumbers);
 
+    if (!docNames || docNames.length === 0) {
+      throw new Error("No files found in the document system.");
+    }
 
+    console.log("✅ Found document files:", docNames.length);
 
-    
+    // Downloading the files locally into a folder named after the phone number
+    const downloadResult = await downloadBlobs(docNames, phone);
+
+    if (!downloadResult.success) {
+      throw new Error("Error occurred while downloading the files from the server.");
+    }
+
+    console.log(`✅ Files downloaded successfully to clients/${phone}/`);
+
+    // Sending the files one by one via WhatsApp
+    const downloadFolder = path.join(__dirname, "clients", phone);
+    const files = fs.readdirSync(downloadFolder);
+
+    for (const file of files) {
+      const filePath = path.join(downloadFolder, file);
+      const caption = "📸 Your photo file from Or Hashen"; // You can customize this text
+
+      console.log(`📤 Sending file: ${filePath}`);
+      await sendWhatsAppFileLocal(`${phone}@c.us`, filePath, caption);
+    }
+
+    // Deleting the folder after sending all files
+    fs.rmSync(downloadFolder, { recursive: true, force: true });
+    console.log(`🗑️ Deleted folder: clients/${phone}/`);
 
   } catch (error) {
-    console.error("שגיאה בבדיקת צילומים:", error.message);
-    throw error; // כדי שהקורא ידע שהיה כשל
+    console.error("❌ Error in sendCustomerPhotos function:", error.message);
+    throw error; // So the caller will know there was a failure
   }
 }
 
-  
+
+async function fetchDocumentNamesForClients(clientNumbers) {
+  try {
+    let allDocuments = [];
+
+    for (let i = 0; i < clientNumbers.length; i++) {
+      const query = `
+        SELECT docName
+        FROM [dbo].[Documents]
+        WHERE ClientID = @clientNumber;
+      `;
+
+      const result = await pool
+        .request()
+        .input("clientNumber", mssql.NVarChar, clientNumbers[i]) // פרמטר למספר לקוח
+        .query(query);
+
+      if (result.recordset.length > 0) {
+        const docsForClient = result.recordset.map((row) => row.docName);
+        allDocuments.push(...docsForClient);
+      }
+    }
+
+    return allDocuments;
+  } catch (err) {
+    console.error("Error fetching document names:", err);
+    return [];
+  }
+}
+
 
 
 //====================================================//
