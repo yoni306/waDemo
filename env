@@ -16,3 +16,8 @@ DB_SERVER=orhashen.database.windows.net
 
 
 SESSION_SECRET=yonatanorhashen25
+
+
+ADIRAN_URL=https://172.28.10.127:8087
+TADIRAN_USER=YOUR_USER
+TADIRAN_PASS=YOUR_PASS

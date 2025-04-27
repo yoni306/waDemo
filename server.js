@@ -6,7 +6,7 @@ const chatData = require("./chatdata"); // מכיל את messageMapping בצור
 const { sendMessageToChatwoot } = require("./sendtc");
 const mssql = require("mssql"); // הוספת חיבור ל-MSSQL
 const app = express();
-const PORT = 8080;
+const PORT = 3000;
 let db = null;
 
 app.use(bodyParser.json());
@@ -160,25 +160,25 @@ app.post("/api/get-message", async (req, res) => {
   }
 
   // ⭐⭐ כטיפול בשליחת הצילומי⭐⭐
-if (nextState === "sendWhatsAppPhotos") {
-  try {
-    await sendBotPhotos(senderPhone);
-    await sendWhatsAppMessage(
-      senderPhone,
-      "📸 הצילומים נשלחו בהצלחה כאן בווטסאפ!\n\n0) חזרה לתפריט הקודם\n99) חזרה לתפריט הראשי"
-    );
-    await updateCustomerHistory(senderPhone, "server sent photos success");
-  } catch (error) {
-    console.error("Failed to send photos:", error);
-    await sendWhatsAppMessage(
-      senderPhone,
-      "❗ לא נמצאו צילומים לשליחה.\n\n0) חזרה לתפריט הקודם\n99) חזרה לתפריט הראשי"
-    );
-    await updateCustomerHistory(senderPhone, "server sent photos failed");
+  if (nextState === "sendWhatsAppPhotos") {
+    try {
+      await sendBotPhotos(senderPhone);
+      await sendWhatsAppMessage(
+        senderPhone,
+        "📸 הצילומים נשלחו בהצלחה כאן בווטסאפ!\n\n0) חזרה לתפריט הקודם\n99) חזרה לתפריט הראשי"
+      );
+      await updateCustomerHistory(senderPhone, "server sent photos success");
+    } catch (error) {
+      console.error("Failed to send photos:", error);
+      await sendWhatsAppMessage(
+        senderPhone,
+        "❗ לא נמצאו צילומים לשליחה.\n\n0) חזרה לתפריט הקודם\n99) חזרה לתפריט הראשי"
+      );
+      await updateCustomerHistory(senderPhone, "server sent photos failed");
+    }
+    await updateLastInteraction(senderPhone, now);
+    return res.end();
   }
-  await updateLastInteraction(senderPhone, now);
-  return res.end();
-}
 
   const nextNode = chatData.messageMapping[nextState];
   if (!nextNode) {
@@ -207,21 +207,60 @@ if (nextState === "sendWhatsAppPhotos") {
 app.post("/api/or-hashen", async (req, res) => {
   if (!req.body) return res.end();
 
-  const { action, data } = req.body;
+  const { action, data, phone } = req.body;
 
   switch (action) {
     case "sendToPatient":
-      // שליחה לפציינט ברגע שעלה צילום
-      await handleSendToPatient(data);
+      try {
+        let customer = await findCustomerByPhone(phone);
+        if (!customer) {
+          await saveCustomer(phone); // יצירת לקוח חדש אם אין
+          customer = await findCustomerByPhone(phone); // טוענים שוב
+        }
+        // ✅ עכשיו מנסים לשלוח את הצילומים
+        const success = await handleSendToPatient(data, phone);
+        if (success) {
+          const niceMessage =
+            "😊 שלום לך,\n\n" +
+            "📸 להלן צילומים מוכנים מאת *אור השן*.\n\n" +
+            "נשמח תמיד לעמוד לשירותך!";
+
+          // שולחים את ההודעה ללקוח
+          await sendWhatsAppMessage(phone, niceMessage);
+
+          // שומרים במסד שהשרת שלח את הודעת השליחה
+          await updateCustomerHistory(phone, "server Sent ready photos");
+
+          // מחזירים אותו לתפריט הראשי
+          await updateCustomerState(phone, "start");
+
+          console.log(
+            `✅ Sent ready photos message to ${phone} and reset to start menu.`
+          );
+        } else {
+          console.log(
+            `⚠️ Photos sending failed or no photos for ${phone}. No message sent.`
+          );
+        }
+      } catch (error) {
+        console.error(
+          `❌ Failed during sending photos to ${phone}:`,
+          error.message
+        );
+        // במקרה של שגיאה לא עושים כלום
+      }
       break;
+
     case "justLoggedIn":
       // נכנס רק עכשיו למחשב
-      await handleJustLoggedIn(data);
+      await handleJustLoggedIn(phone);
       break;
+
     case "Doctor":
       // בעדר יהיה רשום שזה לא פציינט אלא רופא
-      await Doctor(data);
+      await Doctor(phone);
       break;
+
     default:
       console.log(`Unknown action: ${action}`);
       res.status(400).send("Unknown action");
@@ -230,22 +269,133 @@ app.post("/api/or-hashen", async (req, res) => {
 
   res.status(200).send("Action processed");
 });
-async function handleSendToPatient(data) {
-  // לוגיקה לשליחה לפציינט ברגע שעלה צילום
-  console.log("Handling send to patient with data:", data);
-  // הוסף כאן את הקוד המתאים
+
+async function handleSendToPatient(clientId, phone) {
+  try {
+    console.log(
+      `📥 Received request to send files for ClientID: ${clientId} to phone: ${phone}`
+    );
+
+    // 1. Fetch document names using the helper function
+    const clientNumbers = [clientId.toString()];
+    const docNames = await fetchDocumentNamesForClients(clientNumbers);
+
+    if (!docNames || docNames.length === 0) {
+      console.log(`❌ No documents found for ClientID: ${clientId}`);
+      return;
+    }
+
+    console.log(
+      `✅ Found ${docNames.length} document(s) for ClientID ${clientId}:`,
+      docNames
+    );
+
+    // 2. Download the documents into a local folder named by the phone number
+    const downloadResult = await downloadBlobs(docNames, phone);
+
+    if (!downloadResult.success) {
+      console.error("❌ Failed to download files from Azure storage.");
+      return;
+    }
+
+    console.log(`✅ Files downloaded successfully into clients/${phone}/`);
+
+    // 3. Send each file to the patient's WhatsApp
+    const downloadFolder = path.join(__dirname, "clients", phone);
+    const files = fs.readdirSync(downloadFolder);
+
+    for (const file of files) {
+      const filePath = path.join(downloadFolder, file);
+      const caption = "📸 Your photo file from Or Hashen (sent automatically)";
+
+      console.log(`📤 Sending file: ${filePath}`);
+      await sendWhatsAppFileLocal(`${phone}@c.us`, filePath, caption);
+    }
+
+    // 4. Delete the local folder after sending
+    fs.rmSync(downloadFolder, { recursive: true, force: true });
+    console.log(`🗑️ Deleted folder: clients/${phone}/`);
+  } catch (error) {
+    console.error("❌ Error in handleSendToPatient:", error.message);
+  }
 }
 
-async function handleJustLoggedIn(data) {
-  // לוגיקה לנכנס רק עכשיו למחשב
-  console.log("Handling just logged in with data:", data);
-  // הוסף כאן את הקוד המתאים
+async function handleJustLoggedIn(phone) {
+  try {
+    console.log("📥 Handling just logged in with data:", phone);
+
+    // 🔹 בדיקה אם הלקוח כבר קיים
+    let customer = await findCustomerByPhone(phone);
+    if (!customer) {
+      // אם לא קיים, ניצור חדש
+      await saveCustomer(phone);
+      customer = await findCustomerByPhone(phone);
+      console.log(`✅ Created new customer for phone: ${phone}`);
+    }
+
+    // 🔹 שליחת הודעת קבלת פנים
+    const welcomeMessage =
+      "😊 שלום וברוך הבא ל-*אור השן*!\n\n" +
+      "בהמשך אשלח לך את הצילומים לכאן.\n" +
+      "תוכל גם לקבל צילומים ישירות למייל דרך מערכת השליחה שלנו.";
+
+    await sendWhatsAppMessage(phone, welcomeMessage);
+    await updateCustomerHistory(phone, "server Sent welcome after login");
+    console.log(`✅ Welcome message sent to ${phone}`);
+
+    // 🔹 שליחת קישור למערכת שליחת צילומים
+    const systemLinkMessage = "🔗 https://getphotos.or-hashen.co.il/";
+
+    await sendWhatsAppMessage(phone, systemLinkMessage);
+    await updateCustomerHistory(phone, "server Sent photo system link");
+    console.log(`✅ System link message sent to ${phone}`);
+
+    // 🔹 עדכון הלקוח למצב start
+    await updateCustomerState(phone, "start");
+    console.log(`✅ Customer state reset to 'start' for ${phone}`);
+  } catch (error) {
+    console.error("❌ Error handling justLoggedIn:", error.message);
+  }
 }
 
-async function Doctor(data) {
-  // לוגיקה שבעדר יהיה רשום שזה לא פציינט אלא רופא
-  console.log("Handling not patient but doctor with data:", data);
-  // הוסף כאן את הקוד המתאים
+async function Doctor(clientId, phone) {
+  try {
+    console.log(
+      `📥 Handling doctor flow for clientId: ${clientId}, phone: ${phone}`
+    );
+
+    if (!clientId || !phone) {
+      console.error("❌ Missing clientId or phone in doctor request.");
+      return;
+    }
+
+    // 🔹 שולחים את הצילומים לרופא
+    const success = await handleSendToPatient(clientId, phone);
+
+    if (success) {
+      // 🔹 שולחים הודעה יפה לרופא
+      const doctorMessage =
+        '🦷 שלום ד"ר,\n\n' +
+        "📸 להלן הצילומים של הפציינט שלך.\n\n" +
+        "נשמח להמשיך לעמוד לשירותך בכל עת.";
+
+      await sendWhatsAppMessage(phone, doctorMessage);
+      await updateCustomerHistory(
+        phone,
+        "server Sent patient photos to doctor"
+      );
+
+      console.log(
+        `✅ Sent patient photos and doctor message successfully to ${phone}`
+      );
+    } else {
+      console.log(
+        `⚠️ No photos found for clientId ${clientId}, no message sent.`
+      );
+    }
+  } catch (error) {
+    console.error(`❌ Error in Doctor function for ${phone}:`, error.message);
+  }
 }
 
 //***************************************************************
@@ -399,7 +549,6 @@ async function sendWhatsAppMessage(chatId, message) {
   }
 }
 
-
 async function sendBotPhotos(phone) {
   try {
     const twoYearsAgo = new Date();
@@ -423,7 +572,9 @@ async function sendBotPhotos(phone) {
       throw new Error("No photos found from the last two years.");
     }
 
-    const clientNumbers = result.recordset.map(record => record.ClientID.toString());
+    const clientNumbers = result.recordset.map((record) =>
+      record.ClientID.toString()
+    );
     const numberOfResults = clientNumbers.length;
 
     console.log("✅ Found photos:", numberOfResults);
@@ -442,7 +593,9 @@ async function sendBotPhotos(phone) {
     const downloadResult = await downloadBlobs(docNames, phone);
 
     if (!downloadResult.success) {
-      throw new Error("Error occurred while downloading the files from the server.");
+      throw new Error(
+        "Error occurred while downloading the files from the server."
+      );
     }
 
     console.log(`✅ Files downloaded successfully to clients/${phone}/`);
@@ -462,14 +615,13 @@ async function sendBotPhotos(phone) {
     // Deleting the folder after sending all files
     fs.rmSync(downloadFolder, { recursive: true, force: true });
     console.log(`🗑️ Deleted folder: clients/${phone}/`);
-
   } catch (error) {
     console.error("❌ Error in sendCustomerPhotos function:", error.message);
     throw error; // So the caller will know there was a failure
   }
 }
 
-
+/// פונקציה למציאת שמות תמונות לפי מספרי לקוח
 async function fetchDocumentNamesForClients(clientNumbers) {
   try {
     let allDocuments = [];
@@ -498,8 +650,6 @@ async function fetchDocumentNamesForClients(clientNumbers) {
     return [];
   }
 }
-
-
 
 //====================================================//
 //            חיבור ל-MongoDB והרצת שרת
@@ -547,6 +697,47 @@ async function ConnectSQL() {
   }
 }
 
+async function startNgrokAndUpdateWebhook() {
+  // 1. מאמתים טוקן ngrok
+  await ngrok.authtoken("2rtENTLEfSmTkYy2pvhp7K6I4uA_K3Fkhcr5xeC38PuV9xHo");
+
+  // 2. פותחים את הטאנל
+  const url = await ngrok.connect({ addr: PORT, region: "eu" });
+  console.log(`✅ NGROK URL: ${url}`);
+
+  // 3. עדכון ה-webhook ב-GreenAPI בלבד
+  await axios.post(
+    "https://7105.api.greenapi.com/waInstance7105177666/setSettings/a30c7152283640129f30f70c171078fa4ec39b88ba3a4144a2",
+    { webhookUrl: `${url}/api/get-message`, allowWebhook: true },
+    { headers: { "Content-Type": "application/json" } }
+  );
+  console.log("✅ GreenAPI Webhook updated:", `${url}/api/get-message`);
+}
+
 app.listen(PORT, async () => {
+  await startNgrokAndUpdateWebhook();
   console.log(`Server is running on http://localhost:${PORT}`);
 });
+
+// ─────────────────────────────────────────────
+// Tadiran Call-Monitor  →  WhatsApp
+// ─────────────────────────────────────────────
+conCall: async ({ callerExt, calledExt }) => {
+  const waId = `972${callerExt}@c.us`;
+
+  // 🔹 בדיקה אם קיים במסד
+  let customer = await findCustomerByPhone(waId);
+  if (!customer) {
+    await saveCustomer(waId); // יצירת לקוח חדש
+    customer = await findCustomerByPhone(waId); // טען מחדש
+  }
+
+  const menu = chatData.messageMapping.start.text;
+  const msg =
+    "😊 היי, ראינו שהתקשרת!\n" + "תוכל לבצע כאן מגוון פעולות:\n\n" + menu;
+
+  await sendWhatsAppMessage(waId, msg);
+  await updateCustomerHistory(waId, "server auto-ring");
+  await updateCustomerState(waId, "start");
+  await updateLastInteraction(waId, new Date());
+};
