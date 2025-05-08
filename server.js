@@ -7,10 +7,16 @@ const { sendMessageToChatwoot } = require("./sendtc");
 const mssql = require("mssql"); // הוספת חיבור ל-MSSQL
 const app = express();
 const PORT = 3000;
+const ngrok = require("ngrok");
+require("dotenv").config();
 let db = null;
-
+// בראש server.js - החלף לשורה הזו:
+const { downloadBlobs } = require("./downloedPhtos");
+// ← ייבוא הפונקציה
+const fs = require("fs"); // ← כי sendBotPhotos משתמש ב-fs
+const path = require("path"); // ← כי sendBotPhotos משתמש ב-path
 app.use(bodyParser.json());
-
+const { sendWhatsAppFileLocal } = require("./whatsappSender");
 // =====================
 //  מקבל הודעה מ-GreenAPI
 // =====================
@@ -151,7 +157,8 @@ app.post("/api/get-message", async (req, res) => {
       await sendWhatsAppMessage(senderPhone, msgToSend);
       await updateCustomerHistory(senderPhone, "server default-start");
     } else {
-      const msgToSend = "לא זיהיתי את מה ששלחת.\nתוכל להקיש 0 לתפריט הקודם.";
+      const msgToSend =
+        "לא זיהיתי את מה ששלחת.\nתוכל להקיש 0 לתפריט הקודם או 99 לתפריט הראשי.";
       await sendWhatsAppMessage(senderPhone, msgToSend);
       await updateCustomerHistory(senderPhone, "server default-other");
     }
@@ -187,7 +194,7 @@ app.post("/api/get-message", async (req, res) => {
     );
     const defaultMsg = chatData.messageMapping.default
       ? chatData.messageMapping.default.text
-      : "לא זיהיתי את מה ששלחת.\nתוכל להקיש 0 לתפריט הקודם.";
+      : "לא זיהיתי את מה ששלחת.\nתוכל להקיש 0 לתפריט הקודם או 99 לתפריט הראשי.";
     await sendWhatsAppMessage(senderPhone, defaultMsg);
     await updateCustomerHistory(senderPhone, "server default");
     await updateLastInteraction(senderPhone, now);
@@ -270,19 +277,19 @@ app.post("/api/or-hashen", async (req, res) => {
   res.status(200).send("Action processed");
 });
 
-async function handleSendToPatient(clientId, phone) {
+async function handleSndToPatient(clientId, phone) {
   try {
     console.log(
       `📥 Received request to send files for ClientID: ${clientId} to phone: ${phone}`
     );
 
-    // 1. Fetch document names using the helper function
+    // 1. Fetch document names
     const clientNumbers = [clientId.toString()];
     const docNames = await fetchDocumentNamesForClients(clientNumbers);
 
     if (!docNames || docNames.length === 0) {
       console.log(`❌ No documents found for ClientID: ${clientId}`);
-      return;
+      return false;
     }
 
     console.log(
@@ -290,33 +297,48 @@ async function handleSendToPatient(clientId, phone) {
       docNames
     );
 
-    // 2. Download the documents into a local folder named by the phone number
+    // 2. Download documents into a local folder
     const downloadResult = await downloadBlobs(docNames, phone);
 
     if (!downloadResult.success) {
       console.error("❌ Failed to download files from Azure storage.");
-      return;
+      return false;
     }
 
     console.log(`✅ Files downloaded successfully into clients/${phone}/`);
 
-    // 3. Send each file to the patient's WhatsApp
+    // 3. Send each file to WhatsApp
     const downloadFolder = path.join(__dirname, "clients", phone);
     const files = fs.readdirSync(downloadFolder);
 
+    let sentAny = false;
+
     for (const file of files) {
       const filePath = path.join(downloadFolder, file);
-      const caption = "📸 Your photo file from Or Hashen (sent automatically)";
+      const caption = "📸 להלן צילום ממרפאת אור השן (נשלח אוטומטית)";
 
-      console.log(`📤 Sending file: ${filePath}`);
-      await sendWhatsAppFileLocal(`${phone}@c.us`, filePath, caption);
+      try {
+        console.log(`📤 Sending file: ${file}`);
+        await sendWhatsAppFileLocal(toChatId(phone), filePath, caption);
+        sentAny = true;
+      } catch (err) {
+        console.error(`⚠️ Failed sending ${file}:`, err.message);
+        // ממשיכים לקובץ הבא
+      }
     }
 
-    // 4. Delete the local folder after sending
+    if (!sentAny) {
+      throw new Error("No files could be sent to WhatsApp.");
+    }
+
+    // 4. Delete local folder after sending
     fs.rmSync(downloadFolder, { recursive: true, force: true });
     console.log(`🗑️ Deleted folder: clients/${phone}/`);
+
+    return true; // הצלחה
   } catch (error) {
     console.error("❌ Error in handleSendToPatient:", error.message);
+    return false;
   }
 }
 
@@ -536,7 +558,8 @@ async function updateCustomerHumanStatus(phone, isHuman) {
 // שליחת הודעה בפועל
 async function sendWhatsAppMessage(chatId, message) {
   const url =
-    "https://7105.api.greenapi.com/waInstance7105177666/sendMessage/a30c7152283640129f30f70c171078fa4ec39b88ba3a4144a2";
+    "https://7105.api.greenapi.com/waInstance7105233885/sendMessage/76b502f623244d898cc105f0728c9d563f9f7344d9f14c0ebf";
+
   const payload = { chatId, message };
   const headers = { "Content-Type": "application/json" };
 
@@ -549,75 +572,97 @@ async function sendWhatsAppMessage(chatId, message) {
   }
 }
 
+// ───── Helper: מוודא שיש בדיוק @c.us אחד ─────
+function toChatId(phone) {
+  return phone.endsWith("@c.us") ? phone : `${phone}@c.us`;
+}
+
+/**
+ * שולח ללקוח את כל הקבצים שנמצאו ב־Azure:
+ * 1. מאתר ClientID-ים עפ״י מספר טלפון (חמש שנים אחורה)
+ * 2. שולף שמות קבצים (docNames)
+ * 3. מוריד את מה שקיים ל-clients/<phone>/
+ * 4. שולח כל קובץ אחד-אחד ל-WhatsApp, מדלג על שגיאות ספציפיות
+ * 5. מוחק את התיקייה המקומית
+ */
 async function sendBotPhotos(phone) {
   try {
-    const twoYearsAgo = new Date();
-    twoYearsAgo.setFullYear(twoYearsAgo.getFullYear() - 2);
-    const formattedDate = twoYearsAgo.toISOString().split("T")[0];
+    // ✅ שולח ללקוח הודעה לפני התחלת השליחה
+    await sendWhatsAppMessage(
+      toChatId(phone),
+      "⌛ נא להמתין... הצילומים בדרך אליך 📤"
+    );
+    /* ───────── 1. חיפוש ClientID-ים ───────── */
+    const fiveYearsAgo = new Date();
+    fiveYearsAgo.setFullYear(fiveYearsAgo.getFullYear() - 5);
+    const formattedDate = fiveYearsAgo.toISOString().split("T")[0];
+
+    let localPhone = phone.replace(/\D/g, "");
+    if (localPhone.startsWith("972") && localPhone.length > 9) {
+      localPhone = "0" + localPhone.slice(3);
+    }
+
+    console.log(`🔍 phone=${localPhone}  from=${formattedDate}`);
 
     const query = `
       SELECT ClientID
       FROM dbo.Client
-      WHERE Tel = @clientPhone
-      AND KDate >= @formattedDate;
-    `;
+      WHERE Tel  = @clientPhone
+        AND KDate >= @formattedDate;`;
 
     const result = await pool
       .request()
-      .input("clientPhone", mssql.NVarChar, phone)
+      .input("clientPhone", mssql.NVarChar, localPhone)
       .input("formattedDate", mssql.Date, formattedDate)
       .query(query);
 
-    if (!result.recordset || result.recordset.length === 0) {
-      throw new Error("No photos found from the last two years.");
+    if (!result.recordset.length) {
+      throw new Error("No photos found for the last five years.");
     }
 
-    const clientNumbers = result.recordset.map((record) =>
-      record.ClientID.toString()
+    const clientNumbers = result.recordset.map((row) =>
+      row.ClientID.toString()
     );
-    const numberOfResults = clientNumbers.length;
+    console.log("✅ session numbers:", clientNumbers);
 
-    console.log("✅ Found photos:", numberOfResults);
-    console.log("✅ Photo session numbers:", clientNumbers);
-
-    // Fetching document names based on client numbers
+    /* ───────── 2. שמות קבצים והורדה ───────── */
     const docNames = await fetchDocumentNamesForClients(clientNumbers);
+    if (!docNames.length) throw new Error("No docs");
 
-    if (!docNames || docNames.length === 0) {
-      throw new Error("No files found in the document system.");
-    }
+    console.log("✅ doc files:", docNames.length);
 
-    console.log("✅ Found document files:", docNames.length);
+    const dl = await downloadBlobs(docNames, phone); // phone הוא 972…@c.us
+    if (!dl.success) throw new Error("download failed");
 
-    // Downloading the files locally into a folder named after the phone number
-    const downloadResult = await downloadBlobs(docNames, phone);
-
-    if (!downloadResult.success) {
-      throw new Error(
-        "Error occurred while downloading the files from the server."
-      );
-    }
-
-    console.log(`✅ Files downloaded successfully to clients/${phone}/`);
-
-    // Sending the files one by one via WhatsApp
     const downloadFolder = path.join(__dirname, "clients", phone);
+    console.log("✅ files downloaded to", downloadFolder);
+
+    /* ───────── 3. שליחה ל-WhatsApp ───────── */
     const files = fs.readdirSync(downloadFolder);
+    let sentAny = false;
 
     for (const file of files) {
       const filePath = path.join(downloadFolder, file);
-      const caption = "📸 Your photo file from Or Hashen"; // You can customize this text
+      const caption = "📸 Your photo file from Or Hashen";
 
-      console.log(`📤 Sending file: ${filePath}`);
-      await sendWhatsAppFileLocal(`${phone}@c.us`, filePath, caption);
+      try {
+        console.log("📤 Sending", file);
+        await sendWhatsAppFileLocal(toChatId(phone), filePath, caption);
+        sentAny = true;
+      } catch (err) {
+        console.error("⚠️  skip", file, "-", err.message);
+        // מדלג וממשיך לקובץ הבא
+      }
     }
 
-    // Deleting the folder after sending all files
+    if (!sentAny) throw new Error("nothing went through to WhatsApp");
+
+    /* ───────── 4. ניקוי תיקייה ───────── */
     fs.rmSync(downloadFolder, { recursive: true, force: true });
-    console.log(`🗑️ Deleted folder: clients/${phone}/`);
-  } catch (error) {
-    console.error("❌ Error in sendCustomerPhotos function:", error.message);
-    throw error; // So the caller will know there was a failure
+    console.log(`🗑️  Deleted folder clients/${phone}/`);
+  } catch (err) {
+    console.error("❌ Error in sendBotPhotos:", err.message);
+    throw err; // יעבור לטיפול השגיאה של הקריאה
   }
 }
 
@@ -707,10 +752,11 @@ async function startNgrokAndUpdateWebhook() {
 
   // 3. עדכון ה-webhook ב-GreenAPI בלבד
   await axios.post(
-    "https://7105.api.greenapi.com/waInstance7105177666/setSettings/a30c7152283640129f30f70c171078fa4ec39b88ba3a4144a2",
+    "https://7105.api.greenapi.com/waInstance7105233885/setSettings/76b502f623244d898cc105f0728c9d563f9f7344d9f14c0ebf",
     { webhookUrl: `${url}/api/get-message`, allowWebhook: true },
     { headers: { "Content-Type": "application/json" } }
   );
+
   console.log("✅ GreenAPI Webhook updated:", `${url}/api/get-message`);
 }
 
@@ -719,25 +765,25 @@ app.listen(PORT, async () => {
   console.log(`Server is running on http://localhost:${PORT}`);
 });
 
-// ─────────────────────────────────────────────
-// Tadiran Call-Monitor  →  WhatsApp
-// ─────────────────────────────────────────────
-conCall: async ({ callerExt, calledExt }) => {
-  const waId = `972${callerExt}@c.us`;
+// // ─────────────────────────────────────────────
+// // Tadiran Call-Monitor  →  WhatsApp
+// // ─────────────────────────────────────────────
+// conCall: async ({ callerExt, calledExt }) => {
+//   const waId = `972${callerExt}@c.us`;
 
-  // 🔹 בדיקה אם קיים במסד
-  let customer = await findCustomerByPhone(waId);
-  if (!customer) {
-    await saveCustomer(waId); // יצירת לקוח חדש
-    customer = await findCustomerByPhone(waId); // טען מחדש
-  }
+//   // 🔹 בדיקה אם קיים במסד
+//   let customer = await findCustomerByPhone(waId);
+//   if (!customer) {
+//     await saveCustomer(waId); // יצירת לקוח חדש
+//     customer = await findCustomerByPhone(waId); // טען מחדש
+//   }
 
-  const menu = chatData.messageMapping.start.text;
-  const msg =
-    "😊 היי, ראינו שהתקשרת!\n" + "תוכל לבצע כאן מגוון פעולות:\n\n" + menu;
+//   const menu = chatData.messageMapping.start.text;
+//   const msg =
+//     "😊 היי, ראינו שהתקשרת!\n" + "תוכל לבצע כאן מגוון פעולות:\n\n" + menu;
 
-  await sendWhatsAppMessage(waId, msg);
-  await updateCustomerHistory(waId, "server auto-ring");
-  await updateCustomerState(waId, "start");
-  await updateLastInteraction(waId, new Date());
-};
+//   await sendWhatsAppMessage(waId, msg);
+//   await updateCustomerHistory(waId, "server auto-ring");
+//   await updateCustomerState(waId, "start");
+//   await updateLastInteraction(waId, new Date());
+// };

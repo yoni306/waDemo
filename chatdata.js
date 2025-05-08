@@ -1,5 +1,3 @@
-
-
 const messageMapping = {
   // מצב התחלתי (start)
   start: {
@@ -17,17 +15,16 @@ const messageMapping = {
 
   photoUpload: {
     text:
-      "📸 *בחר אפשרות לקבלת צילומים:*\n\n" +
-      "1) 📱 קבלת הצילומים כאן בווטסאפ\n" +
-      "2) 📧 קבלת הצילומים למייל \n\n" +
-      "0) חזרה לתפריט הראשי",
+      "📸 *הקש 1* לקבלת הצילומים כאן בווטסאפ\n\n" +
+      "✉️ *הקש 2* לקבלת הצילומים למייל\n\n" +
+      "🔙 *הקש 0* חזרה לתפריט הראשי",
     next: {
       1: "sendWhatsAppPhotos",
       2: "sendEmailPhotos",
       0: "start",
     },
   },
-  
+
   sendWhatsAppPhotos: {
     text:
       "📲 הצילומים מהשנתיים האחרונות יישלחו נא להמתין, בתהליך..\n\n" +
@@ -38,7 +35,7 @@ const messageMapping = {
       99: "start",
     },
   },
-  
+
   sendEmailPhotos: {
     text:
       "🔗 לשליחת הצילומים למייל, יש להיכנס למערכת:\n" +
@@ -50,7 +47,6 @@ const messageMapping = {
       99: "start",
     },
   },
-  
 
   // (נפתח כאן מצב זמני של נציג אנושי, נטפל בלוגיקה בהמשך)
   humanRepresentative: {

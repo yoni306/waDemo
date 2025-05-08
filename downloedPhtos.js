@@ -1,76 +1,58 @@
 const { ContainerClient } = require("@azure/storage-blob");
 const fs = require("fs");
 const path = require("path");
-const FileType = require("file-type"); // שימוש בגרסה 16 שתומכת ב-CommonJS
-require("dotenv").config(); // קריאה למשתני סביבה
+const FileType = require("file-type"); // גרסה 16 – CommonJS
+require("dotenv").config();
 
-// ה-URL של קונטיינר עם SAS Token מתוך משתנה סביבה
 const AZURE_STORAGE_SAS_URL = process.env.AZURE_STORAGE_SAS_URL;
 
-// פונקציה להורדת קבצים מה-Azure Blob Storage לתיקייה זמנית
+
 async function downloadBlobs(docNames, tz) {
   try {
-    // יצירת חיבור ל-Container Client באמצעות SAS URL
     const containerClient = new ContainerClient(AZURE_STORAGE_SAS_URL);
 
-    // תיקיית יעד לשמירת הקבצים בתוך clients/ת.ז
-    const downloadFolder = path.join(__dirname, "clients", tz);
+    const downloadFolder = path.join(__dirname, "clients", tz.toString());
     if (!fs.existsSync(downloadFolder)) {
       fs.mkdirSync(downloadFolder, { recursive: true });
     }
 
-    // ודא ש-docNames הוא מערך. אם הוא מחרוזת אחת, הפוך אותו למערך עם פריט אחד
     if (!Array.isArray(docNames)) {
       docNames = [docNames];
     }
 
-    for (let docName of docNames) {
-      const blockBlobClient = containerClient.getBlockBlobClient(docName);
+    let successCount = 0;
 
-      // נתיב זמני להורדת הקובץ ללא סיומת
-      const tempFilePath = path.join(downloadFolder, docName);
+    for (const docName of docNames) {
+      try {
+        const blockBlobClient = containerClient.getBlockBlobClient(docName);
+        const tempFilePath = path.join(downloadFolder, docName);
 
-      // הורדת הבלוב לקובץ זמני
-      await blockBlobClient.downloadToFile(tempFilePath);
+        await blockBlobClient.downloadToFile(tempFilePath); // ⬇⬇⬇
 
-      // קריאת הבתים הראשונים של הקובץ כדי לזהות את סוג הקובץ
-      const readStream = fs.createReadStream(tempFilePath, {
-        start: 0,
-        end: 4100,
-      });
+        // מנסים לזהות סוג קובץ כדי להוסיף סיומת
+        const type = await FileType.fromFile(tempFilePath);
+        const ext = type?.ext ? "." + type.ext : "";
+        const finalFilePath = path.join(downloadFolder, docName + ext);
 
-      // שימוש ב-file-type לזיהוי סוג הקובץ
-      const fileTypeResult = await FileType.fromStream(readStream);
+        fs.renameSync(tempFilePath, finalFilePath);
 
-      // סגירת ה-ReadStream
-      readStream.close();
-
-      let extension = "";
-      if (fileTypeResult && fileTypeResult.ext) {
-        extension = "." + fileTypeResult.ext;
-      } else {
-        // אם לא ניתן לזהות את סוג הקובץ, ניתן להגדיר סיומת ברירת מחדל או להשאיר ללא סיומת
-        extension = ""; // או למשל '.bin'
+        console.log(`✅ downloaded ${docName} → ${finalFilePath}`);
+        successCount++;
+      } catch (err) {
+        console.error(`❌ failed ${docName}: ${err.message}`);
+        // לא זורקים החוצה – פשוט עוברים לקובץ הבא
+        continue;
       }
-
-      // בניית שם הקובץ עם הסיומת
-      const fileName = docName + extension;
-
-      const finalFilePath = path.join(downloadFolder, fileName);
-
-      // שינוי שם הקובץ מהנתיב הזמני לנתיב הסופי עם הסיומת
-      fs.renameSync(tempFilePath, finalFilePath);
-
-      console.log(`Downloaded file: ${fileName} to ${finalFilePath}`);
     }
 
-    return { success: true, message: "Files downloaded successfully" };
-  } catch (error) {
-    console.error("Error downloading blobs:", error);
-    return { success: false, message: "Error downloading blobs", error: error };
+    if (successCount === 0) {
+      return { success: false, message: "no files downloaded" };
+    }
+    return { success: true, message: `downloaded ${successCount} file(s)` };
+  } catch (err) {
+    console.error("❌ critical error in downloadBlobs:", err);
+    return { success: false, message: "critical error", error: err };
   }
 }
 
-module.exports = {
-  downloadBlobs,
-};
+module.exports = { downloadBlobs };
